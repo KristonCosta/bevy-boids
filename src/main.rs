@@ -21,6 +21,12 @@ struct SteeringForceConf {
     max_steering_force: f32,
 }
 
+impl SteeringForceConf {
+    fn get_neighbourhood(&self) -> f32 {
+        self.neighbourhood_size * self.neighbourhood_size
+    }
+}
+
 impl Default for SteeringForceConf {
     fn default() -> Self {
         Self {
@@ -77,12 +83,14 @@ fn main() {
         .add_system(apply_alignment)
         .add_system(apply_cohesion)
         .add_system(apply_seek)
+        .add_system(apply_flee)
         .add_system(
             apply_steering_force
                 .after(apply_separation)
                 .after(apply_alignment)
                 .after(apply_cohesion)
-                .after(apply_seek),
+                .after(apply_seek)
+                .after(apply_flee),
         )
         .run();
 }
@@ -232,7 +240,7 @@ fn apply_alignment(
                 neighbour_transform.translation,
             )
             .length_squared()
-                > conf.neighbourhood_size
+                > conf.get_neighbourhood()
                 || target == neighbour
             {
                 continue;
@@ -268,7 +276,7 @@ fn apply_separation(
                 neighbour_position.translation,
             );
             if distance.length_squared() == 0.0
-                || distance.length_squared() > conf.neighbourhood_size
+                || distance.length_squared() > conf.get_neighbourhood()
             {
                 continue;
             }
@@ -309,6 +317,32 @@ fn apply_seek(
     }
 }
 
+fn apply_flee(
+    buttons: Res<Input<MouseButton>>,
+    level: Res<Level>,
+    windows: Res<Windows>,
+    conf: Res<SteeringForceConf>,
+    query: Query<(Entity, &Transform, &Velocity), With<Boid>>,
+    mut steering_force_query: Query<&mut SteeringForces>,
+) {
+    if buttons.pressed(MouseButton::Right) {
+        let cursor = windows.primary().cursor_position().unwrap();
+        let cursor = Vec3::new(
+            cursor.x - level.area.x / 2.0,
+            cursor.y - level.area.y / 2.0,
+            0.0,
+        );
+        for (entity, transform, velocity) in query.iter() {
+            let force =
+                generate_seek_force(cursor, transform.translation, velocity.0, &level, &conf);
+            if force.length_squared() > 0.0 {
+                let mut forces = steering_force_query.get_mut(entity).unwrap();
+                forces.0.push(SteeringForce::Seek(force.normalize()));
+            }
+        }
+    }
+}
+
 fn generate_seek_force(
     origin: Vec3,
     target: Vec3,
@@ -337,7 +371,7 @@ fn apply_cohesion(
                 neighbour_transform.translation,
             )
             .length_squared()
-                > conf.neighbourhood_size
+                > conf.get_neighbourhood()
                 || target == neighbour
             {
                 continue;
