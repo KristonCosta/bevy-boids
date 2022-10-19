@@ -9,3 +9,4 @@ opt-level = 3
 [dependencies]
 bevy = "0.8"
 rand = "0.8"
+bevy-inspector-egui = "0.13"
