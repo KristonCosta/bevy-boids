@@ -16,8 +16,15 @@ struct SpatialMap {
     lookup_cache: HashMap<i32, HashMap<(usize, usize), HashSet<Entity>>>,
 }
 
+#[derive(Component)]
+struct Target;
+
 struct SpatialMapResource {
     map: SpatialMap,
+}
+
+struct SpatialMapColors {
+    colors: HashMap<usize, Color>,
 }
 
 impl Default for SpatialMapResource {
@@ -189,12 +196,6 @@ struct SteeringForceConf {
     max_steering_force: f32,
 }
 
-impl SteeringForceConf {
-    fn get_neighbourhood(&self) -> f32 {
-        self.neighbourhood_size * self.neighbourhood_size
-    }
-}
-
 impl Default for SteeringForceConf {
     fn default() -> Self {
         Self {
@@ -244,10 +245,15 @@ fn main() {
             area: Vec2::new(500.0, 500.0),
         })
         .insert_resource(SpatialMapResource::default())
+        .insert_resource(SpatialMapColors {
+            colors: HashMap::new(),
+        })
         .add_system(update_position)
         .add_system(on_resize_system)
+        .add_system(update_spatial_color)
         .add_startup_system(setup)
         .add_startup_system(spawn_boids)
+        .add_startup_system(setup_color_materials)
         .add_system(
             load_spatial_map
                 .before(apply_separation)
@@ -298,6 +304,77 @@ fn load_spatial_map(
     res.map = map;
 }
 
+fn setup_color_materials(mut colors: ResMut<SpatialMapColors>) {
+    for index in 0..400 {
+        colors.colors.insert(
+            index,
+            Color::rgb(
+                (index % 25) as f32 / 25.0,
+                (index % 3) as f32 / 3.0,
+                (index % 12) as f32 / 12.0,
+            ),
+        );
+    }
+}
+
+fn update_spatial_color(
+    colors: Res<SpatialMapColors>,
+    mut map: ResMut<SpatialMapResource>,
+    mut materials: ResMut<Assets<ColorMaterial>>,
+    query: Query<(Entity, &Transform, &Handle<ColorMaterial>), With<Boid>>,
+    target: Query<(Entity, &Transform), With<Target>>,
+) {
+    let (target_entity, target_transform) = target.get_single().unwrap();
+    let entities = map
+        .map
+        .get_all_entities_in_radius(target_transform.translation, 2, true);
+    for (neighbour, transform, material) in query.iter() {
+        if let Some(mat) = materials.get_mut(&material) {
+            if entities.contains(&neighbour) {
+                if let Some(index) = map.map.get_index_from_world_coordinates(
+                    transform.translation.x,
+                    transform.translation.y,
+                ) {
+                    mat.color = colors
+                        .colors
+                        .get(&index)
+                        .map(|color| *color)
+                        .unwrap_or(Color::BLACK);
+                }
+            } else {
+                mat.color = Color::BLUE;
+            }
+        }
+    }
+    let (_, _, target_material) = query.get(target_entity).unwrap();
+    if let Some(mat) = materials.get_mut(&target_material) {
+        mat.color = Color::PINK;
+    }
+}
+
+// fn update_spatial_color(
+//     colors: Res<SpatialMapColors>,
+//     map: Res<SpatialMapResource>,
+//     mut materials: ResMut<Assets<ColorMaterial>>,
+//     query: Query<(&Transform, &Handle<ColorMaterial>), With<Boid>>,
+//     target: Query<(Entity, &Transform), With<Target>>,
+// ) {
+//     for (transform, material) in query.iter() {
+//         if let Some(mat) = materials.get_mut(&material) {
+//             if let Some(index) = map
+//                 .map
+//                 .get_index_from_world_coordinates(transform.translation.x, transform.translation.y)
+//             {
+//                 mat.color = colors
+//                     .colors
+//                     .get(&index)
+//                     .map(|color| *color)
+//                     .unwrap_or(Color::BLUE);
+//             }
+//         }
+//     }
+// }
+
 fn spawn_boids(
     mut commands: Commands,
     mut meshes: ResMut<Assets<Mesh>>,
@@ -307,7 +384,7 @@ fn spawn_boids(
     let mut rng = thread_rng();
     let width = level.area.x / 2.0;
     let height = level.area.y / 2.0;
-    for i in 0..2000 {
+    for i in 0..100 {
         let pos_x = rng.gen_range(-width..width);
         let vel_x = rng.gen_range(-10.0..10.0) * 10.0;
 
@@ -320,7 +397,7 @@ fn spawn_boids(
             ColorMaterial::from(Color::BLUE)
         };
 
-        commands
+        let entity = commands
             .spawn()
             .insert_bundle(MaterialMesh2dBundle {
                 mesh: meshes.add(shape::RegularPolygon::new(20., 3).into()).into(),
@@ -330,7 +407,11 @@ fn spawn_boids(
             })
             .insert(Boid)
             .insert(Velocity(Vec3::new(vel_x, vel_y, 0.0)))
-            .insert(SteeringForces::default());
+            .insert(SteeringForces::default())
+            .id();
+        if i == 0 {
+            commands.entity(entity).insert(Target);
+        }
     }
 }
 
@@ -422,7 +503,6 @@ fn apply_steering_force(
 }
 
 fn apply_alignment(
-    level: Res<Level>,
     conf: Res<SteeringForceConf>,
     velocity_query: Query<(Entity, &Transform, &Velocity), With<Boid>>,
     mut spatial_map: ResMut<SpatialMapResource>,
