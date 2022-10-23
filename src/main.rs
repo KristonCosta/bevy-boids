@@ -13,6 +13,7 @@ struct SpatialMap {
     cell_width: f32,
     cell_height: f32,
     entries: Vec<Option<HashSet<Entity>>>,
+    entity_to_index: HashMap<Entity, usize>,
     lookup_cache: HashMap<i32, HashMap<(usize, usize), HashSet<Entity>>>,
 }
 
@@ -38,6 +39,7 @@ impl Default for SpatialMapResource {
                 entries: Vec::new(),
                 cell_width: 1.0,
                 cell_height: 1.0,
+                entity_to_index: HashMap::new(),
                 lookup_cache: HashMap::new(),
             },
         }
@@ -63,20 +65,21 @@ impl SpatialMap {
             cell_width: world_width / width as f32,
             cell_height: world_height / height as f32,
             lookup_cache: HashMap::new(),
+            entity_to_index: HashMap::new(),
         }
     }
 
     fn load_entity(&mut self, entity: Entity, position: &Vec3) {
-        let index = self.get_index_from_world_coordinates(position.x, position.y);
-        if let Some(index) = index {
+        if let Some(index) = self.get_index_from_world_coordinates(position.x, position.y) {
             let entry = self.entries.get_mut(index).unwrap();
             if let Some(set) = entry {
                 set.insert(entity);
             } else {
                 let mut set = HashSet::new();
                 set.insert(entity);
-                self.entries.insert(index, Some(set));
+                self.entries[index] = Some(set);
             }
+            self.entity_to_index.insert(entity, index);
         } else {
             println!("Could not load entity with position {:?}", position);
         }
@@ -115,6 +118,9 @@ impl SpatialMap {
         spatial_radius: i32,
         allow_wrapping: bool,
     ) -> HashSet<Entity> {
+        let spatial_radius = spatial_radius
+            .min(self.width as i32)
+            .min(self.height as i32);
         if let Some((origin_x, origin_y)) =
             self.get_local_coordinates_from_world_coodinates(origin.x, origin.y)
         {
@@ -129,8 +135,15 @@ impl SpatialMap {
             let mut set = HashSet::new();
             for offset_x in -spatial_radius..spatial_radius {
                 let (origin_x, origin_y) = (origin_x as i32, origin_y as i32);
-                if let Some(x) = correct_bounds(origin_x + offset_x, 0, self.width as i32, true) {
+                if let Some(x) =
+                    correct_bounds(origin_x + offset_x, 0, self.width as i32, allow_wrapping)
+                {
                     for offset_y in -spatial_radius..spatial_radius {
+                        if offset_x * offset_x + offset_y * offset_y
+                            > spatial_radius * spatial_radius
+                        {
+                            continue;
+                        }
                         if let Some(y) = correct_bounds(
                             origin_y + offset_y,
                             0,
@@ -139,6 +152,7 @@ impl SpatialMap {
                         ) {
                             let index =
                                 self.get_index_from_local_coordinates(x as usize, y as usize);
+
                             if let Some(entities) = self.entries.get(index).unwrap() {
                                 set.extend(entities.iter())
                             }
@@ -191,9 +205,12 @@ struct SteeringForceConf {
     seek: f32,
     #[inspectable(min = 10.0, max = 10000.0)]
     max_speed: f32,
-    neighbourhood_size: f32,
+    #[inspectable(min = 1, max = 100)]
+    neighbourhood_size: i32,
     steering_force_tweaker: f32,
     max_steering_force: f32,
+    #[inspectable(min = 2, max = 100)]
+    spatial_map_grid_size: usize,
 }
 
 impl Default for SteeringForceConf {
@@ -204,9 +221,10 @@ impl Default for SteeringForceConf {
             cohesion: 2.0,
             seek: 10.0,
             max_speed: 1000.0,
-            neighbourhood_size: 1000.0,
+            neighbourhood_size: 4,
             steering_force_tweaker: 200.0,
             max_steering_force: 4.0,
+            spatial_map_grid_size: 10,
         }
     }
 }
@@ -250,7 +268,11 @@ fn main() {
         })
         .add_system(update_position)
         .add_system(on_resize_system)
-        .add_system(update_spatial_color)
+        .add_system(
+            update_spatial_color
+                .after(load_spatial_map)
+                .before(apply_steering_force),
+        )
         .add_startup_system(setup)
         .add_startup_system(spawn_boids)
         .add_startup_system(setup_color_materials)
@@ -287,20 +309,23 @@ fn load_spatial_map(
     mut res: ResMut<SpatialMapResource>,
     query: Query<(Entity, &Transform), With<Boid>>,
     level: Res<Level>,
+    conf: Res<SteeringForceConf>,
 ) {
     // TODO: We should only remake the map if there was a size change, otherwise
     // just clear.
     let mut map = SpatialMap::new(
-        10,
-        10,
+        conf.spatial_map_grid_size,
+        conf.spatial_map_grid_size,
         level.area.x / 2.0,
         level.area.y / 2.0,
         level.area.x,
         level.area.y,
     );
+
     for (entity, transform) in query.iter() {
         map.load_entity(entity, &transform.translation);
     }
+
     res.map = map;
 }
 
@@ -317,17 +342,86 @@ fn setup_color_materials(mut colors: ResMut<SpatialMapColors>) {
     }
 }
 
+// fn update_spatial_color(
+//     colors: Res<SpatialMapColors>,
+//     mut map: ResMut<SpatialMapResource>,
+//     mut materials: ResMut<Assets<ColorMaterial>>,
+//     query: Query<(Entity, &Transform, &Handle<ColorMaterial>), With<Boid>>,
+//     target: Query<(Entity, &Transform), With<Target>>,
+// ) {
+//     for (neighbour, _, material) in query.iter() {
+//         if let Some(mat) = materials.get_mut(&material) {
+//             mat.color = Color::BLACK;
+//         }
+//     }
+//     let mut index = 0;
+//     for entry in map.map.entries.iter() {
+//         if let Some(set) = entry {
+//             for entity in set.iter() {
+//                 let (_, transform, material) = query.get(*entity).unwrap();
+//                 if let Some(mat) = materials.get_mut(&material) {
+//                     if let Some(entity_index) = map.map.get_index_from_world_coordinates(
+//                         transform.translation.x,
+//                         transform.translation.y,
+//                     ) {
+//                         mat.color =
+//                             if *map.map.entity_to_index.get(&entity).unwrap() == entity_index {
+//                                 Color::BLUE
+//                             } else {
+//                                 Color::RED
+//                             }
+//                     }
+
+//                     mat.color = colors
+//                         .colors
+//                         .get(&index)
+//                         .map(|color| *color)
+//                         .unwrap_or(Color::BLUE);
+//                 }
+//             }
+//         }
+//         index += 1;
+//     }
+//     let (entity, transform) = target.get_single().unwrap();
+//     let index = map
+//         .map
+//         .get_index_from_world_coordinates(transform.translation.x, transform.translation.y);
+//     //println!("INDEX: {:?}", index);
+//     if let Some(index) = index {
+//         if let Some(set) = map.map.entries.get(index).unwrap() {
+//             if set.contains(&entity) {
+//                 //          println!("Entity in set");
+//             } else {
+//                 println!("Entity not in set");
+//                 if *map.map.entity_to_index.get(&entity).unwrap() == index {
+//                     println!("Entity to index matched");
+//                 }
+//             }
+//         } else {
+//             println!("Entity not in set");
+//             if *map.map.entity_to_index.get(&entity).unwrap() == index {
+//                 println!("Entity to index matched");
+//             }
+//         }
+//     }
+//     // println!("{:?}", map.map.entity_to_index)
+// }
+
 fn update_spatial_color(
     colors: Res<SpatialMapColors>,
+    conf: Res<SteeringForceConf>,
     mut map: ResMut<SpatialMapResource>,
     mut materials: ResMut<Assets<ColorMaterial>>,
     query: Query<(Entity, &Transform, &Handle<ColorMaterial>), With<Boid>>,
     target: Query<(Entity, &Transform), With<Target>>,
 ) {
+    // return;
     let (target_entity, target_transform) = target.get_single().unwrap();
-    let entities = map
-        .map
-        .get_all_entities_in_radius(target_transform.translation, 2, true);
+    let entities = map.map.get_all_entities_in_radius(
+        target_transform.translation,
+        conf.neighbourhood_size,
+        true,
+    );
     for (neighbour, transform, material) in query.iter() {
         if let Some(mat) = materials.get_mut(&material) {
             if entities.contains(&neighbour) {
@@ -335,14 +429,19 @@ fn update_spatial_color(
                     transform.translation.x,
                     transform.translation.y,
                 ) {
-                    mat.color = colors
-                        .colors
-                        .get(&index)
-                        .map(|color| *color)
-                        .unwrap_or(Color::BLACK);
+                    // mat.color = if let Some(set) = map.map.entries.get(index).unwrap() {
+                    //     if set.contains(&neighbour) {
+                    //         Color::BLUE
+                    //     } else {
+                    //         Color::RED
+                    //     }
+                    // } else {
+                    //     Color::RED
+                    // };
                 }
-            } else {
                 mat.color = Color::BLUE;
+            } else {
+                mat.color = Color::BLACK;
             }
         }
     }
@@ -384,7 +483,7 @@ fn spawn_boids(
     let mut rng = thread_rng();
     let width = level.area.x / 2.0;
     let height = level.area.y / 2.0;
-    for i in 0..100 {
+    for i in 0..2000 {
         let pos_x = rng.gen_range(-width..width);
         let vel_x = rng.gen_range(-10.0..10.0) * 10.0;
 
@@ -511,10 +610,11 @@ fn apply_alignment(
     for (target, mut forces) in steering_force_query.iter_mut() {
         let mut average_heading = Vec3::ZERO;
         let (_, target_transform, target_vel) = velocity_query.get(target).unwrap();
-        let neighbours =
-            spatial_map
-                .map
-                .get_all_entities_in_radius(target_transform.translation, 2, true);
+        let neighbours = spatial_map.map.get_all_entities_in_radius(
+            target_transform.translation,
+            conf.neighbourhood_size,
+            true,
+        );
         let mut neighbour_count = neighbours.len();
         for neighbour in neighbours.into_iter() {
             if target == neighbour {
@@ -543,10 +643,11 @@ fn apply_separation(
 ) {
     for (target, target_transform) in position_query.iter() {
         let mut steering_force = Vec3::ZERO;
-        let neighbours =
-            spatial_map
-                .map
-                .get_all_entities_in_radius(target_transform.translation, 4, true);
+        let neighbours = spatial_map.map.get_all_entities_in_radius(
+            target_transform.translation,
+            conf.neighbourhood_size,
+            true,
+        );
 
         for neighbour in neighbours.into_iter() {
             let (_, neighbour_transform) = position_query.get(neighbour).unwrap();
@@ -578,7 +679,7 @@ fn apply_seek(
     query: Query<(Entity, &Transform, &Velocity), With<Boid>>,
     mut steering_force_query: Query<&mut SteeringForces>,
 ) {
-    if buttons.pressed(MouseButton::Left) && false {
+    if buttons.pressed(MouseButton::Left) {
         if let Some(cursor) = windows.primary().cursor_position() {
             let cursor = Vec3::new(
                 cursor.x - level.area.x / 2.0,
@@ -646,10 +747,11 @@ fn apply_cohesion(
         let mut center_of_mass = Vec3::ZERO;
 
         let (_, target_transform, target_vel) = query.get(target).unwrap();
-        let neighbours =
-            spatial_map
-                .map
-                .get_all_entities_in_radius(target_transform.translation, 2, true);
+        let neighbours = spatial_map.map.get_all_entities_in_radius(
+            target_transform.translation,
+            conf.neighbourhood_size,
+            true,
+        );
         let mut neighbour_count = neighbours.len();
         for neighbour in neighbours.into_iter() {
             if target == neighbour {
