@@ -607,27 +607,38 @@ fn apply_alignment(
     mut spatial_map: ResMut<SpatialMapResource>,
     mut steering_force_query: Query<(Entity, &mut SteeringForces)>,
 ) {
+    let mut result_set = HashMap::new();
     for (target, mut forces) in steering_force_query.iter_mut() {
-        let mut average_heading = Vec3::ZERO;
         let (_, target_transform, target_vel) = velocity_query.get(target).unwrap();
-        let neighbours = spatial_map.map.get_all_entities_in_radius(
-            target_transform.translation,
-            conf.neighbourhood_size,
-            true,
+        let index = spatial_map.map.get_index_from_world_coordinates(
+            target_transform.translation.x,
+            target_transform.translation.y,
         );
-        let mut neighbour_count = neighbours.len();
-        for neighbour in neighbours.into_iter() {
-            if target == neighbour {
-                neighbour_count -= 1;
-                continue;
+        if index.is_none() {
+            continue;
+        }
+        let index = index.unwrap();
+        if !result_set.contains_key(&index) {
+            let mut average_heading = Vec3::ZERO;
+
+            let neighbours = spatial_map.map.get_all_entities_in_radius(
+                target_transform.translation,
+                conf.neighbourhood_size,
+                true,
+            );
+            let neighbour_count = neighbours.len();
+            for neighbour in neighbours.into_iter() {
+                let (_, _, neighbour_vel) = velocity_query.get(neighbour).unwrap();
+                average_heading += neighbour_vel.heading();
             }
-            let (_, _, neighbour_vel) = velocity_query.get(neighbour).unwrap();
-            average_heading += neighbour_vel.heading();
+            result_set.insert(index, (average_heading, neighbour_count));
         }
 
-        if neighbour_count > 0 {
-            let corrected_heading = average_heading - target_vel.0;
-            let normalized_heading = corrected_heading / (neighbour_count as f32);
+        let (average_heading, neighbour_count) = result_set.get(&index).unwrap();
+
+        if *neighbour_count > 0 {
+            let corrected_heading = *average_heading - target_vel.0;
+            let normalized_heading = corrected_heading / (*neighbour_count as f32);
 
             forces.0.push(SteeringForce::Alignment(normalized_heading));
         }
