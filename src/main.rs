@@ -224,7 +224,7 @@ impl Default for SteeringForceConf {
             neighbourhood_size: 4,
             steering_force_tweaker: 200.0,
             max_steering_force: 4.0,
-            spatial_map_grid_size: 10,
+            spatial_map_grid_size: 40,
         }
     }
 }
@@ -483,7 +483,7 @@ fn spawn_boids(
     let mut rng = thread_rng();
     let width = level.area.x / 2.0;
     let height = level.area.y / 2.0;
-    for i in 0..2000 {
+    for i in 0..5000 {
         let pos_x = rng.gen_range(-width..width);
         let vel_x = rng.gen_range(-10.0..10.0) * 10.0;
 
@@ -635,12 +635,63 @@ fn apply_alignment(
         }
 
         let (average_heading, neighbour_count) = result_set.get(&index).unwrap();
-
-        if *neighbour_count > 0 {
+        let neighbour_count = *neighbour_count - 1;
+        if neighbour_count > 0 {
             let corrected_heading = *average_heading - target_vel.0;
-            let normalized_heading = corrected_heading / (*neighbour_count as f32);
+            let normalized_heading = corrected_heading / (neighbour_count as f32);
 
             forces.0.push(SteeringForce::Alignment(normalized_heading));
+        }
+    }
+}
+
+fn apply_cohesion(
+    level: Res<Level>,
+    conf: Res<SteeringForceConf>,
+    query: Query<(Entity, &Transform, &Velocity), With<Boid>>,
+    mut spatial_map: ResMut<SpatialMapResource>,
+    mut steering_force_query: Query<(Entity, &mut SteeringForces)>,
+) {
+    let mut result_set = HashMap::new();
+    for (target, mut forces) in steering_force_query.iter_mut() {
+        let mut center_of_mass = Vec3::ZERO;
+
+        let (_, target_transform, target_vel) = query.get(target).unwrap();
+        let index = spatial_map.map.get_index_from_world_coordinates(
+            target_transform.translation.x,
+            target_transform.translation.y,
+        );
+        if index.is_none() {
+            continue;
+        }
+        let index = index.unwrap();
+        let neighbours = spatial_map.map.get_all_entities_in_radius(
+            target_transform.translation,
+            conf.neighbourhood_size,
+            true,
+        );
+        if !result_set.contains_key(&index) {
+            let neighbour_count = neighbours.len();
+            for neighbour in neighbours.into_iter() {
+                let (_, neighbour_transform, _) = query.get(neighbour).unwrap();
+                center_of_mass += neighbour_transform.translation;
+            }
+            result_set.insert(index, (center_of_mass, neighbour_count));
+        }
+        let (center_of_mass, neighbour_count) = result_set.get(&index).unwrap();
+        let neighbour_count = *neighbour_count - 1;
+        let center_of_mass = *center_of_mass - target_transform.translation;
+        if neighbour_count > 0 {
+            let force = generate_seek_force(
+                target_transform.translation,
+                center_of_mass / neighbour_count as f32,
+                target_vel.0,
+                &level,
+                &conf,
+            );
+            if force.length_squared() > 0.0 {
+                forces.0.push(SteeringForce::Cohesion(force.normalize()));
+            }
         }
     }
 }
@@ -745,47 +796,6 @@ fn generate_seek_force(
 ) -> Vec3 {
     let desired = shortest_path_to_target(&level, target, origin).normalize() * conf.max_speed;
     desired - current_velocity
-}
-
-fn apply_cohesion(
-    level: Res<Level>,
-    conf: Res<SteeringForceConf>,
-    query: Query<(Entity, &Transform, &Velocity), With<Boid>>,
-    mut spatial_map: ResMut<SpatialMapResource>,
-    mut steering_force_query: Query<(Entity, &mut SteeringForces)>,
-) {
-    for (target, mut forces) in steering_force_query.iter_mut() {
-        let mut center_of_mass = Vec3::ZERO;
-
-        let (_, target_transform, target_vel) = query.get(target).unwrap();
-        let neighbours = spatial_map.map.get_all_entities_in_radius(
-            target_transform.translation,
-            conf.neighbourhood_size,
-            true,
-        );
-        let mut neighbour_count = neighbours.len();
-        for neighbour in neighbours.into_iter() {
-            if target == neighbour {
-                neighbour_count -= 1;
-                continue;
-            }
-            let (_, neighbour_transform, _) = query.get(neighbour).unwrap();
-            center_of_mass += neighbour_transform.translation;
-        }
-
-        if neighbour_count > 0 {
-            let force = generate_seek_force(
-                target_transform.translation,
-                center_of_mass / neighbour_count as f32,
-                target_vel.0,
-                &level,
-                &conf,
-            );
-            if force.length_squared() > 0.0 {
-                forces.0.push(SteeringForce::Cohesion(force.normalize()));
-            }
-        }
-    }
 }
 
 fn on_resize_system(mut level: ResMut<Level>, mut resize_reader: EventReader<WindowResized>) {
